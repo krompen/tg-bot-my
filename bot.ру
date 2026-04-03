@@ -1,0 +1,351 @@
+import sqlite3
+import datetime
+import random
+import os
+from telegram import Update, ReplyKeyboardMarkup, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+TOKEN = "8612518554:AAEHLo932IWNFCRyDjWJkhagMFXVhpn2cc8"
+ADMIN_ID = 8032626504  # Твой Telegram ID
+
+# ========== БАЗА ДАННЫХ ==========
+DB_NAME = "database.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    # Таблица пользователей
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+        user_id INTEGER PRIMARY KEY,
+        username TEXT,
+        first_name TEXT,
+        last_name TEXT,
+        joined_date TEXT,
+        last_active TEXT,
+        is_banned INTEGER DEFAULT 0
+    )''')
+    # Таблица логов
+    c.execute('''CREATE TABLE IF NOT EXISTS logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        command TEXT,
+        timestamp TEXT
+    )''')
+    # Таблица шаблонов ответов
+    c.execute('''CREATE TABLE IF NOT EXISTS templates (
+        keyword TEXT PRIMARY KEY,
+        response TEXT
+    )''')
+    conn.commit()
+    conn.close()
+
+def add_user(user_id, username, first_name, last_name):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute('''INSERT OR IGNORE INTO users (user_id, username, first_name, last_name, joined_date, last_active)
+                 VALUES (?, ?, ?, ?, ?, ?)''',
+              (user_id, username, first_name, last_name, now, now))
+    conn.commit()
+    conn.close()
+
+def update_last_active(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute('UPDATE users SET last_active = ? WHERE user_id = ?', (now, user_id))
+    conn.commit()
+    conn.close()
+
+def log_command(user_id, command):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.execute('INSERT INTO logs (user_id, command, timestamp) VALUES (?, ?, ?)', (user_id, command, now))
+    conn.commit()
+    conn.close()
+
+def is_banned(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT is_banned FROM users WHERE user_id = ?', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    return row and row[0] == 1
+
+def ban_user(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('UPDATE users SET is_banned = 1 WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def unban_user(user_id):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('UPDATE users SET is_banned = 0 WHERE user_id = ?', (user_id,))
+    conn.commit()
+    conn.close()
+
+def get_all_users():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT user_id, username, first_name, last_name, joined_date, last_active, is_banned FROM users')
+    users = c.fetchall()
+    conn.close()
+    return users
+
+def get_template_response(keyword):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT response FROM templates WHERE keyword = ?', (keyword.lower(),))
+    row = c.fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def add_template(keyword, response):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('INSERT OR REPLACE INTO templates (keyword, response) VALUES (?, ?)', (keyword.lower(), response))
+    conn.commit()
+    conn.close()
+
+def delete_template(keyword):
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('DELETE FROM templates WHERE keyword = ?', (keyword.lower(),))
+    conn.commit()
+    conn.close()
+
+def get_all_templates():
+    conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('SELECT keyword, response FROM templates')
+    templates = c.fetchall()
+    conn.close()
+    return templates
+
+# ========== КЛАВИАТУРЫ ==========
+def main_keyboard():
+    keyboard = [["🕒 Время", "📝 Совет"], ["❓ Помощь"]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def admin_keyboard():
+    keyboard = [
+        ["📊 Статистика", "📢 Рассылка"],
+        ["👥 Пользователи", "🔨 Бан/Разбан"],
+        ["📝 Шаблоны", "🔙 Назад"]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def back_keyboard():
+    keyboard = [["🔙 Назад"]]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+# ========== КОМАНДЫ ДЛЯ ВСЕХ ==========
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if is_banned(user.id):
+        await update.message.reply_text("⛔ Вы забанены и не можете использовать бота.")
+        return
+    add_user(user.id, user.username, user.first_name, user.last_name)
+    update_last_active(user.id)
+    log_command(user.id, "/start")
+    text = f"🤝 Привет, {user.first_name}!\n\n/help — список команд\n/time — время\n/advice — совет"
+    if user.id == ADMIN_ID:
+        text += "\n\n👑 У тебя есть доступ к админ-меню: /admin"
+    await update.message.reply_text(text, reply_markup=main_keyboard())
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_banned(update.effective_user.id):
+        await update.message.reply_text("⛔ Вы забанены.")
+        return
+    log_command(update.effective_user.id, "/help")
+    await update.message.reply_text("📌 Команды:\n/start — приветствие\n/help — помощь\n/time — время\n/advice — совет")
+
+async def time_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_banned(update.effective_user.id):
+        await update.message.reply_text("⛔ Вы забанены.")
+        return
+    log_command(update.effective_user.id, "/time")
+    now = datetime.datetime.now().strftime("%H:%M:%S")
+    await update.message.reply_text(f"🕒 {now}")
+
+async def advice_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if is_banned(update.effective_user.id):
+        await update.message.reply_text("⛔ Вы забанены.")
+        return
+    log_command(update.effective_user.id, "/advice")
+    advices = ["💡 Выпей воды", "💡 Сделай глубокий вдох", "💡 Отложи телефон на 5 минут", "💡 Ты молодец, держись!"]
+    await update.message.reply_text(random.choice(advices))
+
+# ========== АДМИН-КОМАНДЫ ==========
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Нет прав.")
+        return
+    log_command(user.id, "/admin")
+    await update.message.reply_text("👑 Админ-панель", reply_markup=admin_keyboard())
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    users = get_all_users()
+    total = len(users)
+    banned = sum(1 for u in users if u[6] == 1)
+    active = total - banned
+    await update.message.reply_text(f"📊 Статистика:\n👥 Всего: {total}\n✅ Активных: {active}\n🔨 Забанено: {banned}")
+
+async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    users = get_all_users()
+    if not users:
+        await update.message.reply_text("Нет пользователей.")
+        return
+    text = "👥 Список пользователей:\n\n"
+    for u in users:
+        status = "🔨" if u[6] == 1 else "✅"
+        text += f"{status} {u[2]} (@{u[1]}) — ID: {u[0]}\n"
+    await update.message.reply_text(text[:4000])
+
+async def admin_ban_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    await update.message.reply_text("Введите ID пользователя для бана/разбана:", reply_markup=back_keyboard())
+    context.user_data["awaiting_ban"] = True
+
+async def handle_ban_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("awaiting_ban"):
+        try:
+            user_id = int(update.message.text)
+            if is_banned(user_id):
+                unban_user(user_id)
+                await update.message.reply_text(f"✅ Пользователь {user_id} разбанен.")
+            else:
+                ban_user(user_id)
+                await update.message.reply_text(f"🔨 Пользователь {user_id} забанен.")
+        except ValueError:
+            await update.message.reply_text("❌ Введи числовой ID.")
+        context.user_data["awaiting_ban"] = False
+        await admin_panel(update, context)
+
+async def admin_templates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    templates = get_all_templates()
+    if not templates:
+        await update.message.reply_text("Нет шаблонов.\nДобавить: /add_template слово | ответ\nУдалить: /del_template слово")
+    else:
+        text = "📝 Шаблоны:\n"
+        for kw, resp in templates:
+            text += f"• {kw} → {resp[:30]}...\n"
+        await update.message.reply_text(text)
+
+async def add_template_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text("Использование: /add_template слово | ответ")
+        return
+    full = " ".join(args).split("|")
+    if len(full) < 2:
+        await update.message.reply_text("Используй | для разделения слова и ответа")
+        return
+    keyword, response = full[0].strip(), full[1].strip()
+    add_template(keyword, response)
+    await update.message.reply_text(f"✅ Шаблон добавлен: {keyword}")
+
+async def del_template_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /del_template слово")
+        return
+    keyword = context.args[0]
+    delete_template(keyword)
+    await update.message.reply_text(f"✅ Шаблон удалён: {keyword}")
+
+async def admin_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    await update.message.reply_text("📢 Введите текст рассылки:", reply_markup=back_keyboard())
+    context.user_data["awaiting_broadcast"] = True
+
+async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("awaiting_broadcast"):
+        text = update.message.text
+        users = get_all_users()
+        sent = 0
+        for u in users:
+            if u[6] == 0:  # не забанен
+                try:
+                    await context.bot.send_message(chat_id=u[0], text=f"📢 Рассылка:\n\n{text}")
+                    sent += 1
+                except:
+                    pass
+        await update.message.reply_text(f"✅ Рассылка отправлена {sent} пользователям.")
+        context.user_data["awaiting_broadcast"] = False
+        await admin_panel(update, context)
+
+# ========== ОБРАБОТКА КНОПОК ==========
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if is_banned(user_id):
+        await update.message.reply_text("⛔ Вы забанены.")
+        return
+    update_last_active(user_id)
+    text = update.message.text
+
+    # Проверка шаблонов
+    template = get_template_response(text)
+    if template:
+        await update.message.reply_text(template)
+        return
+
+    if text == "🕒 Время":
+        await time_command(update, context)
+    elif text == "📝 Совет":
+        await advice_command(update, context)
+    elif text == "❓ Помощь":
+        await help_command(update, context)
+    elif text == "🔙 Назад":
+        await start(update, context)
+    elif user_id == ADMIN_ID:
+        if text == "👑 Админ-панель":
+            await admin_panel(update, context)
+        elif text == "📊 Статистика":
+            await admin_stats(update, context)
+        elif text == "📢 Рассылка":
+            await admin_broadcast(update, context)
+        elif text == "👥 Пользователи":
+            await admin_users(update, context)
+        elif text == "🔨 Бан/Разбан":
+            await admin_ban_menu(update, context)
+        elif text == "📝 Шаблоны":
+            await admin_templates(update, context)
+    else:
+        await update.message.reply_text("❓ Не понял команду. Напиши /help.")
+
+# ========== ЗАПУСК ==========
+def main():
+    init_db()
+    app = Application.builder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("time", time_command))
+    app.add_handler(CommandHandler("advice", advice_command))
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("add_template", add_template_command))
+    app.add_handler(CommandHandler("del_template", del_template_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"^\d+$"), handle_ban_input))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"^[^/]"), handle_broadcast))
+
+    print("✅ Бот запущен с полной админкой и БД")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
