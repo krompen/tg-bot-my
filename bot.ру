@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Анонимные вопросы @ciwige
+"""
+
+import sqlite3
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
+from telegram.constants import ParseMode
+
+# ==================== КОНФИГУРАЦИЯ ====================
+BOT_TOKEN = "8432336972:AAFC1RwB1llGnCYck0HyV-_BTtYp5CNGiVQ"
+ADMIN_ID = 8032626504
+ADMIN_USERNAME = "@ciwige"
+
+DB_NAME = "anon_questions.db"
+
+# ==================== БАЗА ДАННЫХ ====================
+def init_db():
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS questions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            question TEXT,
+            answer TEXT,
+            answered INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''')
+        c.execute('''CREATE TABLE IF NOT EXISTS banned (
+            user_id INTEGER PRIMARY KEY
+        )''')
+        conn.commit()
+
+init_db()
+
+def is_banned(user_id: int) -> bool:
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute('SELECT 1 FROM banned WHERE user_id = ?', (user_id,))
+        return c.fetchone() is not None
+
+def save_question(user_id: int, question: str) -> int:
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute('INSERT INTO questions (user_id, question) VALUES (?, ?)',
+                 (user_id, question))
+        conn.commit()
+        return c.lastrowid
+
+# ==================== ОБРАБОТЧИКИ ====================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    if is_banned(user.id):
+        await update.message.reply_text("🚫 Вы заблокированы.")
+        return
+    
+    text = f"""<b>💬 АНОНИМНЫЙ ВОПРОС</b>
+
+Задайте вопрос анонимно — он отправится {ADMIN_USERNAME}.
+
+━━━━━━━━━━━━━━━━
+<b>✨ Правила:</b>
+• Без оскорблений
+• Без спама
+• Без угроз
+
+Нарушители блокируются.
+
+━━━━━━━━━━━━━━━━
+Просто напишите ваш вопрос:"""
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📢 Канал", url="https://t.me/teg_search_ciwige")]
+    ])
+    
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=keyboard)
+
+async def handle_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text
+    
+    # Пропускаем, если админ в режиме ответа
+    if user.id == ADMIN_ID and context.user_data.get('awaiting_answer'):
+        return
+    
+    if is_banned(user.id):
+        await update.message.reply_text("🚫 Вы заблокированы.")
+        return
+    
+    if len(text) < 5:
+        await update.message.reply_text("❌ Вопрос слишком короткий. Напишите подробнее.")
+        return
+    
+    if len(text) > 500:
+        await update.message.reply_text("❌ Вопрос слишком длинный. Максимум 500 символов.")
+        return
+    
+    q_id = save_question(user.id, text)
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📨 Ответить", callback_data=f'answer_{q_id}')],
+        [InlineKeyboardButton("🚫 Забанить", callback_data=f'ban_{user.id}')]
+    ])
+    
+    await context.bot.send_message(
+        ADMIN_ID,
+        f"💬 <b>НОВЫЙ ВОПРОС #{q_id}</b>\n\n"
+        f"❓ {text}\n\n"
+        f"━━━━━━━━━━━━━━━━",
+        parse_mode=ParseMode.HTML,
+        reply_markup=keyboard
+    )
+    
+    await update.message.reply_text(
+        "✅ Ваш вопрос отправлен анонимно!\n"
+        "💬 Ответ появится в этом чате.",
+        reply_to_message_id=update.message.message_id
+    )
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if query.from_user.id != ADMIN_ID:
+        await query.answer("❌ Нет доступа", show_alert=True)
+        return
+    
+    if data.startswith('answer_'):
+        q_id = int(data.split('_')[1])
+        context.user_data['answering'] = q_id
+        context.user_data['awaiting_answer'] = True  # ← ВАЖНО: включаем режим ответа
+        
+        await query.edit_message_text(
+            f"📨 <b>ОТВЕТ НА ВОПРОС #{q_id}</b>\n\n"
+            f"Введите ваш ответ:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("❌ Отмена", callback_data='cancel_answer')]
+            ])
+        )
+    
+    elif data.startswith('ban_'):
+        user_id = int(data.split('_')[1])
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.execute('INSERT OR IGNORE INTO banned (user_id) VALUES (?)', (user_id,))
+            conn.commit()
+        await query.edit_message_text(f"🚫 Пользователь {user_id} забанен.")
+    
+    elif data == 'cancel_answer':
+        context.user_data.pop('answering', None)
+        context.user_data.pop('awaiting_answer', None)
+        await query.edit_message_text("❌ Ответ отменён.")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text
+    
+    # Если это админ и он в режиме ответа
+    if user.id == ADMIN_ID and context.user_data.get('awaiting_answer'):
+        q_id = context.user_data.get('answering')
+        
+        if not q_id:
+            return
+        
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            c.execute('SELECT user_id FROM questions WHERE id = ?', (q_id,))
+            row = c.fetchone()
+            
+            if not row:
+                await update.message.reply_text("❌ Вопрос не найден")
+                context.user_data.pop('answering', None)
+                context.user_data.pop('awaiting_answer', None)
+                return
+            
+            user_id = row[0]
+            c.execute('UPDATE questions SET answer = ?, answered = 1 WHERE id = ?', (text, q_id))
+            conn.commit()
+        
+        # Отправляем ответ пользователю
+        try:
+            await context.bot.send_message(
+                user_id,
+                f"📨 <b>ОТВЕТ НА ВАШ ВОПРОС</b>\n\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"{text}\n"
+                f"━━━━━━━━━━━━━━━━\n\n"
+                f"{ADMIN_USERNAME}",
+                parse_mode=ParseMode.HTML
+            )
+            await update.message.reply_text(f"✅ Ответ на вопрос #{q_id} отправлен!")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Не удалось отправить ответ: {e}")
+        
+        context.user_data.pop('answering', None)
+        context.user_data.pop('awaiting_answer', None)
+        return
+    
+    # Иначе обрабатываем как вопрос
+    await handle_question(update, context)
+
+async def ban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("/ban ID")
+        return
+    user_id = int(context.args[0])
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.execute('INSERT OR IGNORE INTO banned (user_id) VALUES (?)', (user_id,))
+        conn.commit()
+    await update.message.reply_text(f"🚫 {user_id} забанен")
+
+async def unban_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    if not context.args:
+        await update.message.reply_text("/unban ID")
+        return
+    user_id = int(context.args[0])
+    with sqlite3.connect(DB_NAME) as conn:
+        conn.execute('DELETE FROM banned WHERE user_id = ?', (user_id,))
+        conn.commit()
+    await update.message.reply_text(f"✅ {user_id} разбанен")
+
+async def stats_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        return
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        total = c.execute('SELECT COUNT(*) FROM questions').fetchone()[0]
+        answered = c.execute('SELECT COUNT(*) FROM questions WHERE answered = 1').fetchone()[0]
+        banned = c.execute('SELECT COUNT(*) FROM banned').fetchone()[0]
+    
+    await update.message.reply_text(
+        f"📊 <b>СТАТИСТИКА</b>\n\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"❓ Всего вопросов: {total}\n"
+        f"✅ Отвечено: {answered}\n"
+        f"🚫 Забанено: {banned}",
+        parse_mode=ParseMode.HTML
+    )
+
+# ==================== ЗАПУСК ====================
+def main():
+    app = Application.builder().token(BOT_TOKEN).build()
+    
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("ban", ban_cmd))
+    app.add_handler(CommandHandler("unban", unban_cmd))
+    app.add_handler(CommandHandler("stats", stats_cmd))
+    
+    app.add_handler(CallbackQueryHandler(button_handler))
+    
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    
+    print("Бот анонимных вопросов запущен!")
+    app.run_polling(drop_pending_updates=True)
+
+if __name__ == "__main__":
+    main()
